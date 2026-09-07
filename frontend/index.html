@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="hr">
+
+<head>
+<meta charset="UTF-8">
+<title>Dashboard</title>
+
+<style>
+body{font-family:Arial;margin:0;background:#f3f4f6;color:#1f2937}
+header,main{max-width:1400px;margin:auto;padding:20px}
+header{background:white;max-width:none;border-bottom:1px solid #ddd}
+h1{margin:0;color:#2563eb}
+section{margin-bottom:22px}
+.card{background:white;border:1px solid #ddd;border-radius:6px;padding:16px}
+#chart{width:100%;height:300px}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+button{border:0;border-radius:6px;padding:9px 15px;color:white;cursor:pointer}
+#pause{background:#dc3545}
+#resume{background:#198754}
+#download{background:#2563eb}
+#logs{height:150px;overflow:auto;list-style:none;padding:12px}
+@media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+
+<body>
+
+<header><h1>Dashboard</h1></header>
+
+<main>
+
+<section>
+<h2>IoT senzori</h2>
+<div class="card"><canvas id="chart"></canvas></div>
+</section>
+
+<section>
+<h2>Upravljanje</h2>
+<div class="card">
+<button id="pause" onclick="control('pause')">Pauziraj</button>
+<button id="resume" onclick="control('resume')">Nastavi</button>
+&nbsp; Status: <b id="status">nepoznat</b>
+</div>
+</section>
+
+<section>
+<h2>Metrike klastera</h2>
+<div id="cluster" class="grid"></div>
+</section>
+
+<section>
+<h2>Logovi</h2>
+<button id="download" onclick="downloadLogs()">Preuzmi logove</button>
+<ul id="logs" class="card"></ul>
+</section>
+
+</main>
+
+<script>
+let ws;
+let logovi=[];
+let podaci=[];
+
+
+function connect(){
+    ws=new WebSocket("ws://192.168.50.10:8765");
+
+    ws.onmessage=e=>{
+        const m=JSON.parse(e.data);
+
+        podaci=m.iot;
+        logovi=m.logs;
+
+        draw();
+        metrics(m.cluster);
+        status(m.simulator_status);
+
+        document.getElementById("logs").innerHTML=
+            logovi.map(x=>`<li>${x}</li>`).join("");
+    };
+
+    ws.onclose=()=>setTimeout(connect,2000);
+}
+
+
+function control(command){
+    if(ws && ws.readyState===WebSocket.OPEN)
+        ws.send(JSON.stringify({command}));
+}
+
+
+function status(s){
+    document.getElementById("status").textContent=
+        s==="running" ? "aktivan" :
+        s==="paused" ? "pauziran" :
+        s==="offline" ? "nije pokrenut" :
+        "nepoznat";
+
+    document.getElementById("pause").disabled=s!=="running";
+    document.getElementById("resume").disabled=s!=="paused";
+}
+
+
+function metrics(nodes){
+    const root=document.getElementById("cluster");
+
+    root.innerHTML=Object.entries(nodes).map(([name,v])=>`
+        <div class="card">
+            <h3>${name}</h3>
+            CPU: ${v.cpu}%<br>
+            RAM: ${v.ram}%<br>
+            Disk: ${v.disk}%<br>
+            Latency: ${v.latency} ms<br>
+            Throughput: ${v.throughput} msg/s<br>
+            Received: ${v.received}<br>
+            Outputs: ${v.outputs}
+        </div>
+    `).join("");
+}
+
+
+function draw(){
+    const c=document.getElementById("chart");
+    const ctx=c.getContext("2d");
+    const r=c.getBoundingClientRect();
+
+    c.width=r.width;
+    c.height=r.height;
+
+    const left=55;
+    const right=20;
+    const top=35;
+    const bottom=45;
+    const max=70;
+
+    ctx.clearRect(0,0,c.width,c.height);
+    ctx.font="12px Arial";
+    ctx.fillStyle="#374151";
+
+    // Y os: 0 - 70
+    for(let value=0; value<=max; value+=10){
+        const y=c.height-bottom-(value/max)*(c.height-top-bottom);
+
+        ctx.strokeStyle="#e5e7eb";
+        ctx.beginPath();
+        ctx.moveTo(left,y);
+        ctx.lineTo(c.width-right,y);
+        ctx.stroke();
+
+        ctx.fillText(value,left-28,y+4);
+    }
+
+    // Osi
+    ctx.strokeStyle="#6b7280";
+    ctx.beginPath();
+    ctx.moveTo(left,top);
+    ctx.lineTo(left,c.height-bottom);
+    ctx.lineTo(c.width-right,c.height-bottom);
+    ctx.stroke();
+
+    // Labele osi
+    ctx.fillText("Vrijednost (°C / %)",left,18);
+    ctx.fillText("Vrijeme",c.width/2-20,c.height-10);
+
+    // Legenda
+    ctx.fillStyle="#dc3545";
+    ctx.fillRect(c.width-230,12,14,3);
+    ctx.fillStyle="#374151";
+    ctx.fillText("Temperatura (°C)",c.width-210,17);
+
+    ctx.fillStyle="#0d6efd";
+    ctx.fillRect(c.width-105,12,14,3);
+    ctx.fillStyle="#374151";
+    ctx.fillText("Vlažnost (%)",c.width-85,17);
+
+    if(podaci.length<2) return;
+
+    const tickCount=Math.min(5,podaci.length);
+
+    for(let t=0; t<tickCount; t++){
+        const i=Math.round(t*(podaci.length-1)/(tickCount-1));
+        const x=left+i*(c.width-left-right)/(podaci.length-1);
+        const d=new Date(Number(podaci[i].ts)*1000);
+        const label=d.toLocaleTimeString("hr-HR",{
+            hour:"2-digit",
+            minute:"2-digit",
+            second:"2-digit"
+        });
+
+        ctx.fillStyle="#374151";
+        ctx.fillText(label,x-25,c.height-bottom+18);
+    }
+
+    function line(key,color){
+        ctx.strokeStyle=color;
+        ctx.lineWidth=2;
+        ctx.beginPath();
+
+        podaci.forEach((p,i)=>{
+            const x=left+i*(c.width-left-right)/(podaci.length-1);
+            const value=Math.max(0,Math.min(max,Number(p[key])));
+            const y=c.height-bottom-(value/max)*(c.height-top-bottom);
+
+            i ? ctx.lineTo(x,y) : ctx.moveTo(x,y);
+        });
+
+        ctx.stroke();
+    }
+
+    line("temperature","#dc3545");
+    line("humidity","#0d6efd");
+}
+
+
+function downloadLogs(){
+    const blob=new Blob([logovi.join("\n")],{type:"text/plain"});
+    const a=document.createElement("a");
+
+    a.href=URL.createObjectURL(blob);
+    a.download="logovi.txt";
+    a.click();
+}
+
+
+connect();
+window.onresize=draw;
+</script>
+
+</body>
+</html>
