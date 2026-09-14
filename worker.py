@@ -15,17 +15,16 @@ PORT = 1883
 NODE = socket.gethostname()
 BATCH_SIZE = int(sys.argv[1]) if len(sys.argv) > 1 else 5
 
-TOPIC_RAW = "iot/raw"
-SHARED_GROUP = "project"
+SHARED_TOPIC = "$share/project/iot/raw"
 TOPIC_RESULT = "edge/result"
-TOPIC_LOG = "edge/log"
 TOPIC_METRICS = f"edge/metrics/{NODE}"
+TOPIC_CONTROL = "edge/control"
 
-SHARED_TOPIC = f"$share/{SHARED_GROUP}/{TOPIC_RAW}"
+METRIC_INTERVAL = 2.0
 
 
 if BATCH_SIZE < 1:
-    print("Veličina batcha mora biti najmanje 1.")
+    print("BATCH mora biti najmanje 1.")
     sys.exit(1)
 
 
@@ -40,60 +39,70 @@ last_received = 0
 latency_sum = 0.0
 latency_count = 0
 
+last_metric_time = time.perf_counter()
+
 
 client = mqtt.Client(client_id=NODE)
 
 
+def reset_metrics():
+    global received, outputs, last_received
+    global latency_sum, latency_count
+    global last_metric_time
+
+    batches.clear()
+    batch_start.clear()
+
+    received = 0
+    outputs = 0
+    last_received = 0
+
+    latency_sum = 0.0
+    latency_count = 0
+
+    last_metric_time = time.perf_counter()
+
+
 def on_connect(client, userdata, flags, rc):
     client.subscribe(SHARED_TOPIC)
-
-    client.publish(
-        TOPIC_LOG,
-        f"[{NODE}] worker spojen, batch={BATCH_SIZE}"
-    )
+    client.subscribe(TOPIC_CONTROL)
 
 
 def on_message(client, userdata, msg):
     global received, outputs
     global latency_sum, latency_count
 
+    if msg.topic == TOPIC_CONTROL:
+
+        if msg.payload.decode().strip() == "reset":
+            reset_metrics()
+
+        return
+
     try:
         data = json.loads(msg.payload.decode())
+
     except (json.JSONDecodeError, UnicodeDecodeError):
-        client.publish(
-            TOPIC_LOG,
-            f"[{NODE}] primljena neispravna JSON poruka"
-        )
         return
 
-    if "sensor" not in data:
-        client.publish(
-            TOPIC_LOG,
-            f"[{NODE}] poruka nema polje sensor"
-        )
+    if (
+        "sensor" not in data
+        or "temperature" not in data
+        or "humidity" not in data
+    ):
         return
 
-    if "temperature" not in data or "humidity" not in data:
-        client.publish(
-            TOPIC_LOG,
-            f"[{NODE}] poruka nema temperaturu ili vlagu"
-        )
-        return
+    sensor = str(data["sensor"])
 
-    sensor = data["sensor"]
-
-    # Ako senzor još nema batch, stvara se novi.
     if sensor not in batches:
         batches[sensor] = []
 
-    # Vrijeme se bilježi kada stigne prva poruka novog batcha.
     if not batches[sensor]:
         batch_start[sensor] = time.perf_counter()
 
     batches[sensor].append(data)
     received += 1
 
-    # Obrada počinje tek kada ovaj senzor prikupi dovoljno mjerenja.
     if len(batches[sensor]) < BATCH_SIZE:
         return
 
@@ -103,23 +112,22 @@ def on_message(client, userdata, msg):
         time.perf_counter() - batch_start[sensor]
     ) * 1000
 
-    temperature_sum = sum(
-        item["temperature"] for item in sensor_batch
-    )
+    avg_temperature = sum(
+        item["temperature"]
+        for item in sensor_batch
+    ) / len(sensor_batch)
 
-    humidity_sum = sum(
-        item["humidity"] for item in sensor_batch
-    )
-
-    average_temperature = temperature_sum / len(sensor_batch)
-    average_humidity = humidity_sum / len(sensor_batch)
+    avg_humidity = sum(
+        item["humidity"]
+        for item in sensor_batch
+    ) / len(sensor_batch)
 
     result = {
         "node": NODE,
         "sensor": sensor,
         "ts": time.time(),
-        "temperature": round(average_temperature, 2),
-        "humidity": round(average_humidity, 2),
+        "temperature": round(avg_temperature, 2),
+        "humidity": round(avg_humidity, 2),
         "samples": len(sensor_batch),
         "latency_ms": round(latency_ms, 1)
     }
@@ -133,7 +141,6 @@ def on_message(client, userdata, msg):
     latency_sum += latency_ms
     latency_count += 1
 
-    # Briše se samo batch obrađenog senzora.
     batches[sensor].clear()
     del batch_start[sensor]
 
@@ -146,35 +153,43 @@ client.loop_start()
 
 print(
     f"Worker {NODE}: "
-    f"batch={BATCH_SIZE}, "
-    f"tema={SHARED_TOPIC}"
+    f"batch={BATCH_SIZE}"
 )
 
 
 try:
     while True:
-        time.sleep(2)
 
-        throughput = (received - last_received) / 2
+        time.sleep(METRIC_INTERVAL)
+
+        now = time.perf_counter()
+        elapsed = now - last_metric_time
+
+        throughput = (
+            received - last_received
+        ) / elapsed
+
         last_received = received
+        last_metric_time = now
 
         if latency_count > 0:
-            average_latency_ms = latency_sum / latency_count
+            avg_latency = (
+                latency_sum / latency_count
+            )
         else:
-            average_latency_ms = 0.0
+            avg_latency = 0.0
 
         latency_sum = 0.0
         latency_count = 0
 
         metrics = {
-            "node": NODE,
-            "cpu": psutil.cpu_percent(),
-            "ram": psutil.virtual_memory().percent,
-            "disk": psutil.disk_usage("/").percent,
-            "latency_ms": round(average_latency_ms, 1),
-            "throughput": round(throughput, 1),
-            "received": received,
-            "outputs": outputs
+            "cpu_percent": psutil.cpu_percent(),
+            "ram_percent": psutil.virtual_memory().percent,
+            "disk_percent": psutil.disk_usage("/").percent,
+            "latency_ms": round(avg_latency, 1),
+            "throughput_msg_s": round(throughput, 2),
+            "received_total": received,
+            "outputs_total": outputs
         }
 
         client.publish(
@@ -182,13 +197,11 @@ try:
             json.dumps(metrics)
         )
 
-except KeyboardInterrupt:
-    client.publish(
-        TOPIC_LOG,
-        f"[{NODE}] worker zaustavljen"
-    )
 
+except KeyboardInterrupt:
+    pass
+
+
+finally:
     client.loop_stop()
     client.disconnect()
-
-    print(f"\nWorker {NODE} zaustavljen.")
