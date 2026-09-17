@@ -1,2 +1,0 @@
-/home/ivan/project/zavrsni-rad/simulator.py:39: DeprecationWarning: Callback API version 1 is deprecated, update to latest version
-  client = mqtt.Client(client_id="simulator")

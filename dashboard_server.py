@@ -21,25 +21,34 @@ logs = []
 simulator_status = "unknown"
 
 
+CSV_FIELDS = [
+    "vrijeme_s",
+    "izvor",
+    "cvor",
+    "velicina_grupe",
+    "ciljana_stopa_poruka_s",
+    "stvarna_stopa_poruka_s",
+    "cpu_postotak",
+    "ram_postotak",
+    "latencija_ms",
+    "primljena_stopa_poruka_s",
+    "propusnost_obrade_poruka_s",
+    "izlazna_stopa_rezultata_s"
+]
+
+
 def save_row(row):
     new_file = not os.path.exists(CSV_FILE)
 
-    fields = [
-        "vrijeme_s",
-        "izvor",
-        "cvor",
-        "ciljana_stopa_poruka_s",
-        "stvarna_stopa_poruka_s",
-        "cpu_postotak",
-        "ram_postotak",
-        "latencija_ms",
-        "propusnost_poruka_s"
-    ]
+    with open(
+        CSV_FILE,
+        "a",
+        newline=""
+    ) as file:
 
-    with open(CSV_FILE, "a", newline="") as file:
         writer = csv.DictWriter(
             file,
-            fieldnames=fields
+            fieldnames=CSV_FIELDS
         )
 
         if new_file:
@@ -60,44 +69,68 @@ def on_message(client, userdata, msg):
     global simulator_status
 
     if msg.topic == "edge/result":
-
         try:
             data = json.loads(msg.payload.decode())
         except json.JSONDecodeError:
             return
 
         iot.append(data)
-
-        # Zadnjih 120 rezultata za prikaz na nadzornoj ploči.
         del iot[:-120]
 
+        return
 
-    elif msg.topic.startswith("edge/metrics/"):
 
+    if msg.topic.startswith("edge/metrics/"):
         try:
             data = json.loads(msg.payload.decode())
         except json.JSONDecodeError:
             return
 
         node = msg.topic.split("/")[-1]
-
         cluster[node] = data
 
         save_row({
             "vrijeme_s": time.time(),
             "izvor": "radni_cvor",
             "cvor": node,
+            "velicina_grupe":
+                data.get("batch_size", ""),
+
             "ciljana_stopa_poruka_s": "",
             "stvarna_stopa_poruka_s": "",
-            "cpu_postotak": data["cpu_percent"],
-            "ram_postotak": data["ram_percent"],
-            "latencija_ms": data["latency_ms"],
-            "propusnost_poruka_s": data["throughput_msg_s"]
+
+            "cpu_postotak":
+                data.get("cpu_percent", ""),
+
+            "ram_postotak":
+                data.get("ram_percent", ""),
+
+            "latencija_ms":
+                data.get("latency_ms", ""),
+
+            "primljena_stopa_poruka_s":
+                data.get(
+                    "input_throughput_msg_s",
+                    ""
+                ),
+
+            "propusnost_obrade_poruka_s":
+                data.get(
+                    "processed_throughput_msg_s",
+                    ""
+                ),
+
+            "izlazna_stopa_rezultata_s":
+                data.get(
+                    "output_rate_result_s",
+                    ""
+                )
         })
 
+        return
 
-    elif msg.topic == "iot/generator_metrics":
 
+    if msg.topic == "iot/generator_metrics":
         try:
             data = json.loads(msg.payload.decode())
         except json.JSONDecodeError:
@@ -107,31 +140,33 @@ def on_message(client, userdata, msg):
             "vrijeme_s": time.time(),
             "izvor": "simulator",
             "cvor": "",
+            "velicina_grupe": "",
+
             "ciljana_stopa_poruka_s":
                 data["target_rate_msg_s"],
+
             "stvarna_stopa_poruka_s":
                 data["actual_rate_msg_s"],
+
             "cpu_postotak": "",
             "ram_postotak": "",
             "latencija_ms": "",
-            "propusnost_poruka_s": ""
+            "primljena_stopa_poruka_s": "",
+            "propusnost_obrade_poruka_s": "",
+            "izlazna_stopa_rezultata_s": ""
         })
 
+        return
 
-    elif msg.topic == "edge/log":
 
-        logs.append(
-            msg.payload.decode()
-        )
-
+    if msg.topic == "edge/log":
+        logs.append(msg.payload.decode())
         del logs[:-50]
+        return
 
 
-    elif msg.topic == "iot/status":
-
-        simulator_status = (
-            msg.payload.decode()
-        )
+    if msg.topic == "iot/status":
+        simulator_status = msg.payload.decode()
 
 
 mqtt_client = mqtt.Client(
@@ -150,13 +185,9 @@ mqtt_client.loop_start()
 
 
 async def browser(ws):
-
     try:
-
         while True:
-
             try:
-
                 message = await asyncio.wait_for(
                     ws.recv(),
                     timeout=1
@@ -166,11 +197,7 @@ async def browser(ws):
                     message
                 ).get("command")
 
-                if command in (
-                    "pause",
-                    "resume"
-                ):
-
+                if command in ("pause", "resume"):
                     mqtt_client.publish(
                         "iot/control",
                         command
@@ -178,7 +205,6 @@ async def browser(ws):
 
             except asyncio.TimeoutError:
                 pass
-
 
             await ws.send(
                 json.dumps({
@@ -190,18 +216,11 @@ async def browser(ws):
                 })
             )
 
-
     except websockets.exceptions.ConnectionClosed:
         pass
 
 
 async def main():
-
-    print(
-        "Nadzorna ploča: "
-        "ws://0.0.0.0:8765"
-    )
-
     async with websockets.serve(
         browser,
         "0.0.0.0",

@@ -1,2 +1,0 @@
-/home/ivan/project/zavrsni-rad/dashboard_server.py:137: DeprecationWarning: Callback API version 1 is deprecated, update to latest version
-  mqtt_client = mqtt.Client(
